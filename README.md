@@ -1,6 +1,6 @@
 Basic Directory Structure: 
 
-google-calendar-api/
+google-calendar-api-go/
 │
 ├── main.go
 ├── credentials.json
