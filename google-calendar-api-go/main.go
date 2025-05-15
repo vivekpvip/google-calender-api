@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/user"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -15,82 +18,66 @@ import (
 	"google.golang.org/api/option"
 )
 
-// Retrieve a token, saves the token, then returns the generated client.
 func getClient(config *oauth2.Config) *http.Client {
-	// Checking that a token file already exists
-	tokenFile := "token.json"
-	tok, err := tokenFromFile(tokenFile)
+	//local server for OAuth2 redirect
+	ln, err := net.Listen("tcp", "localhost:8080")
 	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(tokenFile, tok)
+		log.Fatalf("Unable to start local server: %v", err)
 	}
-	return config.Client(context.Background(), tok)
+	defer ln.Close()
+
+	// Generates OAuth2 URL
+	state := "state-token"
+	url := config.AuthCodeURL(state, oauth2.AccessTypeOffline)
+	fmt.Printf("Open the following URL in the browser:\n%v\n", url)
+
+	// Channel to capture the authorization code
+	codeCh := make(chan string)
+	go func() {
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("state") != state {
+				http.Error(w, "State does not match", http.StatusBadRequest)
+				return
+			}
+			code := r.URL.Query().Get("code")
+			fmt.Fprint(w, "Authorization successful! You can close this tab.")
+			codeCh <- code
+		})
+		http.Serve(ln, nil)
+	}()
+
+	code := <-codeCh
+
+	// Exchange code for token
+	token, err := config.Exchange(context.Background(), code)
+	if err != nil {
+		log.Fatalf("Unable to exchange code for token: %v", err)
+	}
+
+	saveToken(token)
+	return config.Client(context.Background(), token)
 }
 
-// Request a token from the web, then return the retrieved token.
-func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
-	url := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Visit the following URL to obtain a code: \n%v\n", url)
-
-	var code string
-	if _, err := fmt.Scan(&code); err != nil {
-		log.Fatalf("Unable to read authorization code: %v", err)
-	}
-
-	tok, err := config.Exchange(context.Background(), code)
-	if err != nil {
-		log.Fatalf("Unable to retrieve token from web: %v", err)
-	}
-	return tok
+func tokenCacheFile() string {
+	usr, _ := user.Current()
+	tokenCacheDir := filepath.Join(usr.HomeDir, ".credentials")
+	os.MkdirAll(tokenCacheDir, 0700)
+	return filepath.Join(tokenCacheDir, "calendar-token.json")
 }
 
-// Retrieves a token from a local file.
-func tokenFromFile(file string) (*oauth2.Token, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	tok := &oauth2.Token{}
-	err = json.NewDecoder(f).Decode(tok)
-	return tok, err
-}
-
-// Saves a token to a file.
-func saveToken(path string, token *oauth2.Token) {
-	fmt.Printf("Saving credential file to: %s\n", path)
-	f, err := os.Create(path)
+// Saves the token to a secure location
+func saveToken(token *oauth2.Token) {
+	file := tokenCacheFile()
+	f, err := os.Create(file)
 	if err != nil {
 		log.Fatalf("Unable to cache OAuth token: %v", err)
 	}
 	defer f.Close()
 	json.NewEncoder(f).Encode(token)
+	fmt.Printf("Token saved to %s\n", file)
 }
 
-func main() {
-	ctx := context.Background()
-
-	
-	b, err := os.ReadFile("credentials.json")
-	if err != nil {
-		log.Fatalf("Unable to read client secret file: %v", err)
-	}
-
-	// Configure OAuth2
-	config, err := google.ConfigFromJSON(b, calendar.CalendarScope)
-	if err != nil {
-		log.Fatalf("Unable to parse client secret file to config: %v", err)
-	}
-
-	client := getClient(config)
-
-	// Create Calendar Service
-	srv, err := calendar.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		log.Fatalf("Unable to retrieve Calendar client: %v", err)
-	}
-
-	// Creating an event
+func createEvent(srv *calendar.Service) string {
 	event := &calendar.Event{
 		Summary:     "Test Event",
 		Location:    "Online",
@@ -110,27 +97,59 @@ func main() {
 		log.Fatalf("Unable to create event: %v", err)
 	}
 	fmt.Printf("Event created: %s\n", createdEvent.HtmlLink)
+	return createdEvent.Id
+}
 
-	// Update the event
-	createdEvent.Summary = "Updated Test Event"
-	updatedEvent, err := srv.Events.Update("primary", createdEvent.Id, createdEvent).Do()
+func updateEvent(srv *calendar.Service, eventId string) {
+	event, err := srv.Events.Get("primary", eventId).Do()
+	if err != nil {
+		log.Fatalf("Unable to retrieve event: %v", err)
+	}
+
+	// Modifications in event fields
+	event.Summary = "Updated Test Event"
+	event.Location = "Updated Location"
+	event.Description = "Updated Description"
+	event.Start.DateTime = time.Now().Add(48 * time.Hour).Format(time.RFC3339)
+	event.End.DateTime = time.Now().Add(49 * time.Hour).Format(time.RFC3339)
+
+	updatedEvent, err := srv.Events.Update("primary", event.Id, event).Do()
 	if err != nil {
 		log.Fatalf("Unable to update event: %v", err)
 	}
 	fmt.Printf("Event updated: %s\n", updatedEvent.HtmlLink)
+}
 
-	// Get the event
-	retrievedEvent, err := srv.Events.Get("primary", updatedEvent.Id).Do()
-	if err != nil {
-		log.Fatalf("Unable to retrieve event: %v", err)
-	}
-	fmt.Printf("Retrieved event: %s\n", retrievedEvent.Summary)
-
-	// Delete the event
-	err = srv.Events.Delete("primary", retrievedEvent.Id).Do()
+func deleteEvent(srv *calendar.Service, eventId string) {
+	err := srv.Events.Delete("primary", eventId).Do()
 	if err != nil {
 		log.Fatalf("Unable to delete event: %v", err)
 	}
 	fmt.Println("Event deleted successfully.")
 }
 
+func main() {
+	ctx := context.Background()
+
+	b, err := os.ReadFile("credentials.json")
+	if err != nil {
+		log.Fatalf("Unable to read credentials.json: %v", err)
+	}
+
+	// Set up OAuth2 config
+	config, err := google.ConfigFromJSON(b, calendar.CalendarScope)
+	if err != nil {
+		log.Fatalf("Unable to parse client secret file to config: %v", err)
+	}
+
+	client := getClient(config)
+	srv, err := calendar.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		log.Fatalf("Unable to retrieve Calendar client: %v", err)
+	}
+
+	// Create, update, and delete event for demonstration
+	eventId := createEvent(srv)
+	updateEvent(srv, eventId)
+	deleteEvent(srv, eventId)
+}
