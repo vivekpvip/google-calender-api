@@ -17,7 +17,7 @@ import (
 
 // Retrieve a token, saves the token, then returns the generated client.
 func getClient(config *oauth2.Config) *http.Client {
-	// Check if a token file already exists
+	// Checking that a token file already exists
 	tokenFile := "token.json"
 	tok, err := tokenFromFile(tokenFile)
 	if err != nil {
@@ -70,7 +70,7 @@ func saveToken(path string, token *oauth2.Token) {
 func main() {
 	ctx := context.Background()
 
-	// Read credentials
+	
 	b, err := os.ReadFile("credentials.json")
 	if err != nil {
 		log.Fatalf("Unable to read client secret file: %v", err)
@@ -90,7 +90,7 @@ func main() {
 		log.Fatalf("Unable to retrieve Calendar client: %v", err)
 	}
 
-	// Create an event
+	// Creating an event
 	event := &calendar.Event{
 		Summary:     "Test Event",
 		Location:    "Online",
